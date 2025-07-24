@@ -12,7 +12,7 @@ async function logAddressBalance(
   return lamports;
 }
 
-describe("staking-anchor", () => {
+describe("vault-anchor", () => {
   // Configure the client to use the local cluster.
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
