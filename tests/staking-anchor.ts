@@ -18,28 +18,25 @@ describe("staking-anchor", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.StakingAnchor as Program<StakingAnchor>;
-  const main_user = anchor.web3.Keypair.generate();
 
   it("Is initialized!", async () => {
     const user_account = provider.wallet.publicKey;
     await logAddressBalance(user_account, provider);
-    // const [_, bump] = anchor.web3.PublicKey.findProgramAddressSync(
-    //   [Buffer.from("vault"), user_account.toBuffer()],
-    //   program.programId
-    // );
-    const tx = await program.methods.initialize().rpc();
+    const tx = await program.methods.initialize().accounts({
+      signer: user_account
+    }).rpc();
     console.log("Your transaction signature", tx);
   });
 
   it("Deposit SOL", async () => {
     const user_account = provider.wallet.publicKey;
-    const [userPda, _bump] = anchor.web3.PublicKey.findProgramAddressSync(
+    const [vaultPda, _bump] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), user_account.toBuffer()],
       program.programId
     );
     const tx = await program.methods
       .deposit(new anchor.BN(1 * anchor.web3.LAMPORTS_PER_SOL))
-      .accounts({ userAccount: user_account }) // why do we not need a user_pda here?
+      .accounts({ signer: user_account }) // why do we not need a user_pda here?
       .rpc();
     console.log("Your transaction signature", tx);
 
@@ -47,25 +44,24 @@ describe("staking-anchor", () => {
 
     // get balance in PDA (should be 1 SOL)
     console.log("PDA Balance :");
-    const userPDABalance = await logAddressBalance(userPda, provider);
+    const userPDABalance = await logAddressBalance(vaultPda, provider);
 
     expect(userPDABalance).greaterThanOrEqual(1 * anchor.web3.LAMPORTS_PER_SOL);
   });
 
   it("Withdraw SOL from PDA", async () => {
     const user_account = provider.wallet.publicKey;
-    const [user_pda, bump] = anchor.web3.PublicKey.findProgramAddressSync(
+    const [user_pda, _bump] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), user_account.toBuffer()],
       program.programId
     );
 
     const priorAccountBalance = await logAddressBalance(user_account, provider);
-    // const priorPDABalance = await logAddressBalance(user_pda, provider);
 
     const tx = await program.methods
-      .withdraw(new anchor.BN(1 * anchor.web3.LAMPORTS_PER_SOL))
+      .withdraw(new anchor.BN(500000000))
       .accounts({
-        userAccount: user_account,
+        signer: user_account,
       })
       .rpc();
 
@@ -74,7 +70,7 @@ describe("staking-anchor", () => {
     const userAccountBalance = await logAddressBalance(user_account, provider);
     const userPDABalance = await logAddressBalance(user_pda, provider);
 
-    expect(userPDABalance).lessThan(1 * anchor.web3.LAMPORTS_PER_SOL);
+    expect(userPDABalance).lessThanOrEqual(500000000);
     expect(userAccountBalance).greaterThan(priorAccountBalance);
   });
 
@@ -93,7 +89,7 @@ describe("staking-anchor", () => {
     const tx = await program.methods
       .close()
       .accounts({
-        userAccount: user_address,
+        signer: user_address,
       })
       .rpc();
     console.log("Your transaction signature : ", tx);
@@ -103,12 +99,8 @@ describe("staking-anchor", () => {
     );
     const pda_lamports_after = await provider.connection.getBalance(user_pda);
 
-
-    console.log("User lamports before :", user_lamports_before);
-    console.log("User lamports after :", user_lamports_after);
-    console.log("PDA lamports before :", pda_lamports_before);
-    console.log("PDA lamports after :", pda_lamports_after);
-
-    // expect
+    expect(user_lamports_before).lessThan(user_lamports_after);
+    expect(pda_lamports_before).greaterThan(pda_lamports_after);
+    expect(pda_lamports_after).equal(0);
   });
 });

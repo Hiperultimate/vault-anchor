@@ -1,8 +1,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(deprecated)]
-use std::io::Empty;
 
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*};
 
 declare_id!("AWBqk3mt4L33JpRWBmJ4YcV2bY7UxauTGJoAhN11AEmu");
 
@@ -12,89 +11,117 @@ pub enum Errors {
     InsufficientLamports,
 }
 
+fn transfer_lamports<'info>(
+    system_program: AccountInfo<'info>,
+    from: AccountInfo<'info>,
+    to: AccountInfo<'info>,
+    amount: u64,
+) -> Result<()> {
+    let tx = CpiContext::new(
+        system_program,
+        anchor_lang::system_program::Transfer { from, to },
+    );
+
+    anchor_lang::system_program::transfer(tx, amount)
+}
+
 #[program]
 pub mod staking_anchor {
-    use anchor_lang::{accounts::signer, system_program::{transfer, Transfer}};
+    use anchor_lang::{
+        system_program::{transfer, Transfer},
+    };
 
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         // Getting user_pda_bump from the users here isnt it risky? What if they pass an incorrect one?
-        msg!("PDA Initialized {:?}", ctx.accounts.user_pda.key());
-        // Calculate rent exempt
-        let rent_expempt_amount = Rent::get()?.minimum_balance(8);
-        // transfer that money to the newly created PDA so the account is published
-        let tx = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_account.to_account_info(),
-                to: ctx.accounts.user_pda.to_account_info(),
-            },
-        );
+        msg!("PDA Initialized {:?}", ctx.accounts.vault_state.key());
 
-        transfer(tx, rent_expempt_amount)?;
-
-        let user_pda = &mut ctx.accounts.user_pda;
-        user_pda.user_pda_bump = ctx.bumps.user_pda;
+        let vault_state = &mut ctx.accounts.vault_state;
+        vault_state.vault_pda_bump = ctx.bumps.vault_state;
+        vault_state.vault_bump = ctx.bumps.vault;
 
         Ok(())
     }
 
-    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    pub fn deposit(ctx: Context<Transact>, amount: u64) -> Result<()> {
         // Check if use have enough lamports
 
-        let user_balance = ctx.accounts.user_account.lamports();
-        msg!("Checking user lamports {:?}", user_balance);
-        msg!("Checking amount {:?}", amount);
+        let user_balance = ctx.accounts.signer.lamports();
+        let vault_balance = ctx.accounts.vault.lamports();
+        msg!("Checking user balance before {:?}", user_balance);
+        msg!("Checking vault balance before {:?}", vault_balance);
         require!(user_balance >= amount, Errors::InsufficientLamports);
 
-        // send lamports from user to this programs PDA of that user
-        let tx = CpiContext::new(
+        transfer_lamports(
             ctx.accounts.system_program.to_account_info(),
-            anchor_lang::system_program::Transfer {
-                from: ctx.accounts.user_account.to_account_info(),
-                to: ctx.accounts.user_pda.to_account_info(),
-            },
-        );
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.vault.to_account_info(),
+            amount,
+        )?;
 
-        anchor_lang::system_program::transfer(tx, amount)?;
-
-        msg!("After user lamports {:?}", user_balance);
-        msg!("After amount {:?}", amount);
+        msg!("Checking user balance after {:?}", user_balance);
+        msg!("Checking vault balance after {:?}", vault_balance);
         Ok(())
     }
 
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+    pub fn withdraw(ctx: Context<Transact>, amount: u64) -> Result<()> {
         // Check if user has enough funds stored in the PDA to withdraw
-        let balance_on_pda = ctx.accounts.user_pda.get_lamports();
+        let balance_on_pda = ctx.accounts.vault.get_lamports();
         require!(balance_on_pda >= amount, Errors::InsufficientLamports);
 
-        let user_account = ctx.accounts.user_account.to_account_info();
-        let user_pda = ctx.accounts.user_pda.to_account_info();
+        let user_account = ctx.accounts.signer.to_account_info();
+        let system_program_info = ctx.accounts.system_program.to_account_info();
 
-        // let system_program_info = ctx.accounts.system_program.to_account_info();
-        // let transfer_ix = Transfer {
-        //     from: user_pda.clone(),
-        //     to: user_account.clone(),
-        // };
-        // let user_key = user_account.key();
-        // let signer_seeds = &[b"vault", user_key.as_ref(), &[ctx.accounts.user_pda.user_pda_bump]];
-        // let signer = &[&signer_seeds[..]];
-        // let tx = CpiContext::new_with_signer(system_program_info, transfer_ix, signer);
+        let transfer_ix = Transfer {
+            from: ctx.accounts.vault.to_account_info(),
+            to: ctx.accounts.signer.to_account_info(),
+        };
+        let user_key = user_account.key();
+        let signer_seeds = &[
+            b"vault",
+            user_key.as_ref(),
+            &[ctx.accounts.vault_state.vault_bump],
+        ];
+        let signer = &[&signer_seeds[..]]; // what in the world is this?
+        let tx = CpiContext::new_with_signer(system_program_info, transfer_ix, signer);
 
-        // transfer(tx, amount)?;
-
-        **user_pda.try_borrow_mut_lamports()? -= amount;
-        **user_account.try_borrow_mut_lamports()? += amount;
-
-        msg!("User account : {:?}", user_account);
-        msg!("User PDA : {:?}", user_pda);
+        transfer(tx, amount)?;
 
         // send lamports to user
         Ok(())
     }
 
-    pub fn close(_ctx: Context<Close>) -> Result<()> {
+    pub fn close(ctx: Context<Close>) -> Result<()> {
+        // transfer all the leftover funds from the wallet
+        let leftover_funds = ctx.accounts.vault.lamports();
+
+        if leftover_funds > 0 {
+            let from = ctx.accounts.vault.to_account_info();
+            let to = ctx.accounts.signer.to_account_info();
+
+            let signer_key = ctx.accounts.signer.key();
+            let signer_val = &[
+                b"vault",
+                signer_key.as_ref(),
+                &[ctx.accounts.vault_state.vault_bump],
+            ];
+
+            let signer_seeds = &[&signer_val[..]];
+
+            let tx =CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from,
+                    to,
+                },
+                signer_seeds,
+            );
+
+            transfer(tx, leftover_funds)?
+        }
+
+        // pda account is already closed thanks to anchor
         msg!("Account closed successfully...");
 
         Ok(())
@@ -102,46 +129,50 @@ pub mod staking_anchor {
 }
 
 #[account]
+#[derive(InitSpace)]
 struct UserData {
-    user_pda_bump: u8,
+    vault_pda_bump: u8,
+    vault_bump: u8,
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
-    pub user_account: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    signer: Signer<'info>,
 
-    #[account(init,payer=user_account, space=8 + 1, seeds=[b"vault", user_account.key.as_ref()], bump)]
-    user_pda: Account<'info, UserData>,
-}
+    #[account(seeds=[b"vault", signer.key().as_ref()], bump)]
+    vault: SystemAccount<'info>,
 
-#[derive(Accounts)]
-pub struct Deposit<'info> {
-    #[account(mut, seeds=[b"vault", user_account.key.as_ref()], bump=user_pda.user_pda_bump)]
-    user_pda: Account<'info, UserData>,
+    #[account(init, payer=signer, space=8+UserData::INIT_SPACE, seeds=[b"state", signer.key().as_ref()], bump)]
+    vault_state: Account<'info, UserData>,
 
-    #[account(mut)]
-    user_account: Signer<'info>,
     system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-// #[instruction(user_pda_bump: u8)]
-pub struct Withdraw<'info> {
-    #[account(mut, seeds=[b"vault", user_account.key.as_ref()], bump=user_pda.user_pda_bump)]
-    user_pda: Account<'info, UserData>,
-
+pub struct Transact<'info> {
     #[account(mut)]
-    user_account: Signer<'info>,
+    signer: Signer<'info>,
+
+    #[account(mut,seeds=[b"vault", signer.key().as_ref()], bump=vault_state.vault_bump)]
+    vault: SystemAccount<'info>,
+
+    #[account(seeds=[b"state", signer.key().as_ref()],bump=vault_state.vault_pda_bump)]
+    vault_state: Account<'info, UserData>,
+
     system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-// #[instruction(user_pda_bump: u8)]
 pub struct Close<'info> {
-    user_account: Signer<'info>,
+    #[account(mut)]
+    signer: Signer<'info>,
 
-    #[account(mut, seeds=[b"vault", user_account.key().as_ref()], bump=user_pda.user_pda_bump, close=user_account)]
-    user_pda: Account<'info, UserData>,
+    #[account(mut, seeds=[b"vault", signer.key().as_ref()], bump=vault_state.vault_bump)]
+    vault: SystemAccount<'info>,
+
+    #[account(mut, seeds=[b"state", signer.key().as_ref()], bump=vault_state.vault_pda_bump, close=signer)]
+    vault_state: Account<'info, UserData>,
+
+    system_program: Program<'info, System>,
 }
